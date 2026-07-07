@@ -1,6 +1,6 @@
 import logging
-from typing import Optional
 
+import httpx
 import aiosmtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 
 
 def _real_recipients(recipients: list[str]) -> list[str]:
-    """Skip fake demo addresses that cannot receive mail."""
     return [
         r.strip()
         for r in recipients
@@ -36,75 +35,136 @@ async def send_email(db: Session, subject: str, recipients: list[str], html_body
     log_id = log.id
 
     if not settings.email_enabled:
-        _append_log_note(db, log_id, html_body, "Email not sent: EMAIL_ENABLED is false")
-        logger.info("Email logged (disabled): %s", subject)
-        return False
-
-    if not settings.smtp_host or not settings.smtp_user or not settings.smtp_password:
-        _append_log_note(db, log_id, html_body, "Email not sent: SMTP not fully configured")
-        logger.warning("SMTP incomplete: host=%s user=%s", settings.smtp_host, bool(settings.smtp_user))
+        _finalize_log(db, log_id, html_body, subject, False, "EMAIL_ENABLED is false")
         return False
 
     if not deliver_to:
-        _append_log_note(
-            db,
-            log_id,
-            html_body,
-            "Email not sent: no real recipient addresses (demo @devtrack.local skipped)",
+        _finalize_log(
+            db, log_id, html_body, subject, False,
+            "No real recipient addresses (demo @devtrack.local addresses are skipped)",
         )
         return False
 
+    if not settings.smtp_from or settings.smtp_from == "devtrack@localhost":
+        _finalize_log(db, log_id, html_body, subject, False, "SMTP_FROM is not set")
+        return False
+
+    # Prefer Brevo HTTP API — more reliable from cloud hosts than SMTP
+    if settings.brevo_api_key:
+        ok, note = await _send_brevo_api(deliver_to, subject, html_body)
+        _finalize_log(db, log_id, html_body, subject, ok, note)
+        return ok
+
+    if settings.smtp_host and settings.smtp_user and settings.smtp_password:
+        ok, note = await _send_smtp(deliver_to, subject, html_body)
+        _finalize_log(db, log_id, html_body, subject, ok, note)
+        return ok
+
+    _finalize_log(db, log_id, html_body, subject, False, "No BREVO_API_KEY or SMTP credentials configured")
+    return False
+
+
+async def _send_brevo_api(recipients: list[str], subject: str, html_body: str) -> tuple[bool, str]:
+    payload = {
+        "sender": {"name": settings.smtp_from_name, "email": settings.smtp_from},
+        "to": [{"email": r} for r in recipients],
+        "subject": subject,
+        "htmlContent": html_body,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.brevo.com/v3/smtp/email",
+                headers={
+                    "api-key": settings.brevo_api_key,
+                    "accept": "application/json",
+                    "content-type": "application/json",
+                },
+                json=payload,
+            )
+        if resp.status_code in (200, 201):
+            msg_id = resp.json().get("messageId", "ok")
+            return True, f"Brevo API sent successfully (messageId: {msg_id}) to {', '.join(recipients)}"
+        return False, f"Brevo API error {resp.status_code}: {resp.text[:500]}"
+    except Exception as e:
+        return False, f"Brevo API failed: {type(e).__name__}: {e}"
+
+
+async def _send_smtp(recipients: list[str], subject: str, html_body: str) -> tuple[bool, str]:
     message = MIMEMultipart("alternative")
     message["From"] = settings.smtp_from
-    message["To"] = ", ".join(deliver_to)
+    message["To"] = ", ".join(recipients)
     message["Subject"] = subject
     message.attach(MIMEText(html_body, "html"))
 
-    try:
-        smtp = aiosmtplib.SMTP(
-            hostname=settings.smtp_host,
-            port=settings.smtp_port,
-            use_tls=False,
-            start_tls=True,
-            timeout=30,
-        )
-        await smtp.connect()
-        await smtp.login(settings.smtp_user, settings.smtp_password)
-        errors = await smtp.send_message(message, recipients=deliver_to)
-        await smtp.quit()
+    attempts = [
+        (settings.smtp_port, False, settings.smtp_port != 465),
+        (465, True, False),
+        (587, False, True),
+    ]
+    seen = set()
+    errors = []
 
-        if errors:
-            err_text = "; ".join(f"{addr}: {err}" for addr, err in errors.items())
-            _append_log_note(db, log_id, html_body, f"SMTP partial failure: {err_text}")
-            logger.error("SMTP errors: %s", err_text)
-            return False
+    for port, use_tls, start_tls in attempts:
+        key = (port, use_tls, start_tls)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            smtp = aiosmtplib.SMTP(
+                hostname=settings.smtp_host,
+                port=port,
+                use_tls=use_tls,
+                start_tls=start_tls,
+                timeout=30,
+            )
+            await smtp.connect()
+            await smtp.login(settings.smtp_user, settings.smtp_password)
+            send_errors = await smtp.send_message(message, recipients=recipients)
+            await smtp.quit()
+            if send_errors:
+                err_text = "; ".join(f"{a}: {e}" for a, e in send_errors.items())
+                errors.append(f"port {port}: {err_text}")
+                continue
+            return True, f"SMTP sent via port {port} to {', '.join(recipients)}"
+        except Exception as e:
+            errors.append(f"port {port}: {type(e).__name__}: {e}")
 
-        _append_log_note(db, log_id, html_body, f"Email sent successfully to: {', '.join(deliver_to)}")
-        logger.info("Email sent: %s -> %s", subject, deliver_to)
-        return True
-
-    except Exception as e:
-        err_msg = f"SMTP failed: {type(e).__name__}: {e}"
-        _append_log_note(db, log_id, html_body, err_msg)
-        logger.exception("Failed to send email")
-        return False
+    return False, "SMTP failed — " + " | ".join(errors)
 
 
-def _append_log_note(db: Session, log_id: int, original_body: str, note: str) -> None:
+def _finalize_log(
+    db: Session, log_id: int, original_body: str, subject: str, success: bool, note: str
+) -> None:
     log = db.query(NotificationLog).filter(NotificationLog.id == log_id).first()
-    if log:
-        log.body = original_body + f"<hr><p><strong>{note}</strong></p>"
-        db.commit()
+    if not log:
+        return
+    prefix = "SENT" if success else "FAILED"
+    log.subject = f"[{prefix}] {subject}"
+    color = "#22c55e" if success else "#ef4444"
+    log.body = original_body + f"<hr><p style='color:{color}'><strong>{note}</strong></p>"
+    db.commit()
+    if success:
+        logger.info("Email %s: %s", prefix, note)
+    else:
+        logger.error("Email %s: %s", prefix, note)
 
 
 def get_email_config_status() -> dict:
     return {
         "email_enabled": settings.email_enabled,
+        "smtp_from": settings.smtp_from,
+        "smtp_from_name": settings.smtp_from_name,
+        "brevo_api_configured": bool(settings.brevo_api_key),
         "smtp_host": settings.smtp_host or None,
         "smtp_port": settings.smtp_port,
         "smtp_user": settings.smtp_user or None,
-        "smtp_from": settings.smtp_from,
         "smtp_configured": bool(
             settings.smtp_host and settings.smtp_user and settings.smtp_password
+        ),
+        "send_method": (
+            "brevo_api" if settings.brevo_api_key
+            else "smtp" if settings.smtp_host and settings.smtp_user and settings.smtp_password
+            else "none"
         ),
     }

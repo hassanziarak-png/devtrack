@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     smtp_user: str = ""
     smtp_password: str = ""
     smtp_from: str = "devtrack@localhost"
+    smtp_from_name: str = "DevTrack"
+    brevo_api_key: str = ""
     email_enabled: bool = False
 
     @field_validator("email_enabled", mode="before")

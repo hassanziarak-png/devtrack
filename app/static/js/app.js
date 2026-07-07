@@ -274,7 +274,7 @@ async function loadEmailStatus() {
     box.innerHTML = `
       <strong>Email status:</strong>
       ${ok ? '<span style="color:#22c55e">Configured</span>' : '<span style="color:#f59e0b">Not fully configured</span>'}
-      · Enabled: ${s.email_enabled} · From: ${s.smtp_from || "—"} · Host: ${s.smtp_host || "—"}`;
+      · Enabled: ${s.email_enabled} · Method: ${s.send_method || "—"} · From: ${s.smtp_from || "—"}`;
   } catch { /* ignore */ }
 }
 
