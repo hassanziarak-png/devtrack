@@ -16,6 +16,7 @@ from app.models import (
     User,
     UserRole,
 )
+from app.email_service import get_email_config_status, send_email
 from app.pdf_service import generate_department_pdf
 from app.schemas import (
     NotificationOut,
@@ -111,6 +112,35 @@ def remove_recipient(
     db.delete(row)
     db.commit()
     return {"ok": True}
+
+
+@router.get("/reports/email-status")
+def email_status(_user=Depends(require_roles(UserRole.MANAGER))):
+    return get_email_config_status()
+
+
+@router.post("/reports/test-email")
+async def test_email(
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(UserRole.MANAGER)),
+):
+    body = """
+    <html><body style="font-family:Arial,sans-serif">
+        <h2>DevTrack Test Email</h2>
+        <p>If you received this, SMTP is working correctly.</p>
+    </body></html>"""
+    ok = await send_email(
+        db,
+        "DevTrack SMTP Test",
+        [user.email],
+        body,
+    )
+    if not ok:
+        raise HTTPException(
+            502,
+            "Test email failed. Open Notification Log for the error details.",
+        )
+    return {"ok": True, "message": f"Test email sent to {user.email}"}
 
 
 @router.get("/reports/pdf")

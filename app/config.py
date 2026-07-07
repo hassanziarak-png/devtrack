@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -20,6 +21,13 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from: str = "devtrack@localhost"
     email_enabled: bool = False
+
+    @field_validator("email_enabled", mode="before")
+    @classmethod
+    def parse_bool(cls, v):
+        if isinstance(v, str):
+            return v.lower() in ("true", "1", "yes", "on")
+        return bool(v)
 
     class Config:
         env_file = ".env"

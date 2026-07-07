@@ -248,6 +248,8 @@ async function loadReports() {
     const settings = await api("/api/reports/settings");
     document.getElementById("report-frequency").value = settings.frequency;
     await loadRecipients();
+    await loadEmailStatus();
+    document.getElementById("test-email-btn")?.classList.remove("hidden");
   }
 
   const notifications = isManager || currentUser?.role === "executive"
@@ -261,6 +263,30 @@ async function loadReports() {
          <td style="font-size:0.8rem">${n.recipients}</td>
        </tr>`).join("")}</tbody></table>`
     : `<p style="color:var(--muted)">No notifications yet. Alerts are logged when SMTP is disabled.</p>`;
+}
+
+async function loadEmailStatus() {
+  try {
+    const s = await api("/api/reports/email-status");
+    const box = document.getElementById("email-status-box");
+    box.classList.remove("hidden");
+    const ok = s.email_enabled && s.smtp_configured;
+    box.innerHTML = `
+      <strong>Email status:</strong>
+      ${ok ? '<span style="color:#22c55e">Configured</span>' : '<span style="color:#f59e0b">Not fully configured</span>'}
+      · Enabled: ${s.email_enabled} · From: ${s.smtp_from || "—"} · Host: ${s.smtp_host || "—"}`;
+  } catch { /* ignore */ }
+}
+
+async function sendTestEmail() {
+  try {
+    const res = await api("/api/reports/test-email", { method: "POST" });
+    showToast(res.message || "Test email sent — check your inbox");
+    loadReports();
+  } catch (err) {
+    showToast(err.message);
+    loadReports();
+  }
 }
 
 async function loadRecipients() {
@@ -631,6 +657,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
     showToast("Report schedule updated");
   });
+
+  document.getElementById("test-email-btn")?.addEventListener("click", sendTestEmail);
 
   document.getElementById("download-pdf")?.addEventListener("click", async () => {
     const res = await api("/api/reports/pdf");
