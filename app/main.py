@@ -19,9 +19,27 @@ logger = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
 
 
+def _seed_if_empty() -> None:
+    """Create demo users on first deploy when database is empty."""
+    db = SessionLocal()
+    try:
+        from app.models import User
+
+        if db.query(User).count() == 0:
+            from seed import seed
+
+            seed()
+            logger.info("Initial database seeded")
+    except Exception as e:
+        logger.warning("Auto-seed skipped: %s", e)
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     run_migrations()
+    _seed_if_empty()
     scheduler = AsyncIOScheduler()
     scheduler.add_job(run_scheduled_report, "cron", hour=8, minute=0)
     scheduler.start()

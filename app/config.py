@@ -1,6 +1,13 @@
 from pydantic_settings import BaseSettings
 
 
+def _fix_database_url(url: str) -> str:
+    """Render provides postgres:// but SQLAlchemy needs postgresql://"""
+    if url.startswith("postgres://"):
+        return url.replace("postgres://", "postgresql://", 1)
+    return url
+
+
 class Settings(BaseSettings):
     app_name: str = "Dynamic DevTrack"
     secret_key: str = "devtrack-secret-change-in-production"
@@ -19,3 +26,4 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+settings.database_url = _fix_database_url(settings.database_url)
