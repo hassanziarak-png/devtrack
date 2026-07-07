@@ -58,6 +58,19 @@ def task_to_out(task: Task) -> TaskOut:
     )
 
 
+def renormalize_queue_orders(db: Session, assignee_id: int) -> None:
+    """Compact queue_order to 1, 2, 3... after delete or reassignment."""
+    tasks = (
+        db.query(Task)
+        .filter(Task.assignee_id == assignee_id)
+        .order_by(Task.queue_order)
+        .all()
+    )
+    for i, task in enumerate(tasks, start=1):
+        task.queue_order = i
+    db.commit()
+
+
 def recalculate_assignee_timeline(db: Session, assignee_id: int) -> list[Task]:
     holidays = get_holiday_dates(db)
     leave_dates = get_leave_dates(db, assignee_id)

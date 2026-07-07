@@ -294,6 +294,12 @@ textarea { min-height: 80px; resize: vertical; }
   gap: 1rem;
 }
 
+.task-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
 .task-item:active { cursor: grabbing; }
 .task-item.sortable-ghost { opacity: 0.4; }
 .task-item.sortable-chosen { border-color: var(--primary); }
@@ -342,7 +348,7 @@ th { color: var(--muted); font-weight: 500; font-size: 0.75rem; text-transform: 
 .modal-actions {
   display: flex;
   gap: 0.75rem;
-  justify-content: flex-end;
+  align-items: center;
   margin-top: 1.25rem;
 }
 

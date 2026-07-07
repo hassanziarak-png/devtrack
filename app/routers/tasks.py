@@ -22,6 +22,7 @@ from app.services.task_service import (
     get_next_queue_order,
     insert_task_at_position,
     recalculate_assignee_timeline,
+    renormalize_queue_orders,
     reorder_tasks,
     send_timeline_alert,
     task_to_out,
@@ -43,6 +44,20 @@ def list_tasks(
         query = query.filter(Task.assignee_id == assignee_id)
     tasks = query.order_by(Task.assignee_id, Task.queue_order).all()
     return [task_to_out(t) for t in tasks]
+
+
+@router.get("/{task_id}", response_model=TaskOut)
+def get_task(
+    task_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(404, "Task not found")
+    if user.role == UserRole.DEVELOPER and task.assignee_id != user.id:
+        raise HTTPException(403, "Cannot view this task")
+    return task_to_out(task)
 
 
 @router.post("", response_model=TaskOut)
@@ -101,18 +116,63 @@ async def update_task(
         raise HTTPException(403, "Cannot modify this task")
 
     old_status = task.status
+    old_assignee_id = task.assignee_id
     data = payload.model_dump(exclude_unset=True)
 
     if "queue_order" in data and not can_reorder_tasks(user):
         raise HTTPException(403, "Only managers can reorder tasks")
 
+    if "assignee_id" in data and data["assignee_id"] != old_assignee_id:
+        if user.role != UserRole.MANAGER:
+            raise HTTPException(403, "Only managers can reassign tasks")
+        new_assignee = db.query(User).filter(User.id == data["assignee_id"]).first()
+        if not new_assignee or new_assignee.role != UserRole.DEVELOPER:
+            raise HTTPException(400, "Assignee must be an active developer")
+
+    reassigning = "assignee_id" in data and data["assignee_id"] != old_assignee_id
+
     for key, value in data.items():
         setattr(task, key, value)
 
+    if reassigning:
+        task.queue_order = get_next_queue_order(db, task.assignee_id)
+
     db.commit()
     db.refresh(task)
-    recalculate_assignee_timeline(db, task.assignee_id)
+
+    if reassigning:
+        renormalize_queue_orders(db, old_assignee_id)
+        recalculate_assignee_timeline(db, old_assignee_id)
+        recalculate_assignee_timeline(db, task.assignee_id)
+    else:
+        recalculate_assignee_timeline(db, task.assignee_id)
+
     db.refresh(task)
+
+    if reassigning:
+        old_assignee = db.query(User).filter(User.id == old_assignee_id).first()
+        new_assignee = db.query(User).filter(User.id == task.assignee_id).first()
+        old_tasks = (
+            db.query(Task).filter(Task.assignee_id == old_assignee_id).order_by(Task.queue_order).all()
+        )
+        new_tasks = (
+            db.query(Task).filter(Task.assignee_id == task.assignee_id).order_by(Task.queue_order).all()
+        )
+        await send_timeline_alert(
+            db,
+            f"Task Reassigned: {task.title}",
+            f'Task "{task.title}" moved from {old_assignee.name} to {new_assignee.name}',
+            new_assignee,
+            new_tasks,
+        )
+        if old_tasks:
+            await send_timeline_alert(
+                db,
+                f"Timeline Updated: {old_assignee.name}",
+                f'Task "{task.title}" removed from queue — remaining tasks rescheduled',
+                old_assignee,
+                old_tasks,
+            )
 
     status_changed = "status" in data and data["status"] != old_status
     if status_changed and task.status in (TaskStatus.TESTING, TaskStatus.COMPLETED):
@@ -132,7 +192,7 @@ async def update_task(
 
 
 @router.delete("/{task_id}")
-def delete_task(
+async def delete_task(
     task_id: int,
     db: Session = Depends(get_db),
     user: User = Depends(require_roles(UserRole.MANAGER)),
@@ -141,9 +201,23 @@ def delete_task(
     if not task:
         raise HTTPException(404, "Task not found")
     assignee_id = task.assignee_id
+    task_title = task.title
+    assignee = db.query(User).filter(User.id == assignee_id).first()
     db.delete(task)
     db.commit()
+    renormalize_queue_orders(db, assignee_id)
     recalculate_assignee_timeline(db, assignee_id)
+    if assignee:
+        remaining = (
+            db.query(Task).filter(Task.assignee_id == assignee_id).order_by(Task.queue_order).all()
+        )
+        await send_timeline_alert(
+            db,
+            f"Task Deleted: {task_title}",
+            f'Task "{task_title}" removed from {assignee.name}\'s queue',
+            assignee,
+            remaining,
+        )
     return {"ok": True}
 
 

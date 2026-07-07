@@ -169,7 +169,10 @@ async function renderQueue(devId) {
           ${t.effort_hours}h · Start: ${t.start_date || "—"} · ECD: ${t.estimated_completion_date || "—"}
         </div>
       </div>
-      <button class="btn btn-sm btn-secondary" onclick="editTask(${t.id})">Edit</button>
+      <div class="task-actions">
+        <button class="btn btn-sm btn-secondary" onclick="editTask(${t.id})">Edit</button>
+        ${currentUser?.role === "manager" ? `<button class="btn btn-sm btn-danger" onclick="deleteTask(${t.id}, '${t.title.replace(/'/g, "\\'")}')">Delete</button>` : ""}
+      </div>
     </div>
   `).join("") || `<p style="color:var(--muted)">No tasks in queue.</p>`;
 
@@ -439,10 +442,9 @@ async function saveProfile(e) {
 let editingTaskId = null;
 
 async function editTask(id) {
-  const tasks = await api(id ? `/api/tasks?assignee_id=${selectedDevId || ""}` : "/api/tasks");
-  const task = tasks.find(t => t.id === id);
-  if (!task) return;
+  const task = await api(`/api/tasks/${id}`);
   editingTaskId = id;
+  const isManager = currentUser?.role === "manager";
   document.getElementById("modal-title").textContent = "Edit Task";
   document.getElementById("task-title").value = task.title;
   document.getElementById("task-description").value = task.description || "";
@@ -450,7 +452,18 @@ async function editTask(id) {
   document.getElementById("task-actual").value = task.actual_hours ?? "";
   document.getElementById("task-status").value = task.status;
   document.getElementById("task-priority").value = task.priority_weight;
-  document.getElementById("task-assignee-group").classList.add("hidden");
+
+  if (isManager) {
+    const devs = await api("/api/developers");
+    document.getElementById("task-assignee").innerHTML = devs.map(d =>
+      `<option value="${d.id}" ${d.id === task.assignee_id ? "selected" : ""}>${d.name}</option>`
+    ).join("");
+    document.getElementById("task-assignee-group").classList.remove("hidden");
+    document.getElementById("delete-task-btn").classList.remove("hidden");
+  } else {
+    document.getElementById("task-assignee-group").classList.add("hidden");
+    document.getElementById("delete-task-btn").classList.add("hidden");
+  }
   document.getElementById("task-modal").classList.remove("hidden");
 }
 
@@ -468,7 +481,23 @@ async function openNewTaskModal() {
 
 function closeModal() {
   document.getElementById("task-modal").classList.add("hidden");
+  document.getElementById("delete-task-btn").classList.add("hidden");
   editingTaskId = null;
+}
+
+async function deleteTask(id, title) {
+  if (!confirm(`Delete task "${title}"? This will reschedule the developer's remaining queue.`)) return;
+  await api(`/api/tasks/${id}`, { method: "DELETE" });
+  showToast("Task deleted — timelines updated");
+  if (selectedDevId) renderQueue(selectedDevId);
+  loadDashboard();
+}
+
+async function deleteTaskFromModal() {
+  if (!editingTaskId) return;
+  const title = document.getElementById("task-title").value;
+  await deleteTask(editingTaskId, title);
+  closeModal();
 }
 
 async function saveTask(e) {
@@ -484,8 +513,11 @@ async function saveTask(e) {
   if (actual !== "") payload.actual_hours = parseFloat(actual);
 
   if (editingTaskId) {
+    if (currentUser?.role === "manager") {
+      payload.assignee_id = parseInt(document.getElementById("task-assignee").value);
+    }
     await api(`/api/tasks/${editingTaskId}`, { method: "PATCH", body: payload });
-    showToast("Task updated — timeline recalculated");
+    showToast("Task updated — timelines recalculated");
   } else {
     payload.assignee_id = parseInt(document.getElementById("task-assignee").value);
     await api("/api/tasks", { method: "POST", body: payload });
@@ -523,6 +555,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     n.addEventListener("click", () => showPage(n.dataset.page))
   );
   document.getElementById("task-form").addEventListener("submit", saveTask);
+  document.getElementById("delete-task-btn")?.addEventListener("click", deleteTaskFromModal);
   document.getElementById("add-task-btn")?.addEventListener("click", openNewTaskModal);
   document.getElementById("add-user-btn")?.addEventListener("click", openUserModal);
   document.getElementById("user-form")?.addEventListener("submit", saveUser);
